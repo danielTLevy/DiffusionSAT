@@ -146,7 +146,8 @@ def main(cfg: DictConfig):
                       check_val_every_n_epoch=cfg.general.check_val_every_n_epochs,
                       fast_dev_run=cfg.general.name == 'debug',
                       strategy='ddp' if cfg.general.gpus > 1 else None,
-                      enable_progress_bar=False,
+                      enable_progress_bar=cfg.general.progress_bar,
+                      overfit_batches=cfg.general.overfit,
                       callbacks=callbacks,
                       logger=[])
 
