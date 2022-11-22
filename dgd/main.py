@@ -19,12 +19,11 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.utilities.warnings import PossibleUserWarning
 
 from dgd import utils
-from dgd.datasets import guacamol_dataset, qm9_dataset, moses_dataset
-from dgd.datasets.spectre_dataset import SBMDataModule, Comm20DataModule, PlanarDataModule, SpectreDatasetInfos
+from dgd.datasets.sat_dataset import SatDataModule, SatDatasetInfos
 from dgd.metrics.abstract_metrics import TrainAbstractMetricsDiscrete, TrainAbstractMetrics
 from dgd.analysis.spectre_utils import PlanarSamplingMetrics, SBMSamplingMetrics, Comm20SamplingMetrics
-from diffusion_model import LiftedDenoisingDiffusion
-from diffusion_model_discrete import DiscreteDenoisingDiffusion
+from dgd.analysis.sat_utils import SatSamplingMetrics
+from diffusion_model_fixed import FixedDiscreteDenoisingDiffusion
 from dgd.metrics.molecular_metrics import TrainMolecularMetrics, SamplingMolecularMetrics, \
     TrainMolecularMetricsDiscrete
 from dgd.analysis.visualization import MolecularVisualization, NonMolecularVisualization
@@ -39,10 +38,7 @@ def get_resume(cfg, model_kwargs):
     saved_cfg = cfg.copy()
     name = cfg.general.name + '_resume'
     resume = cfg.general.test_only
-    if cfg.model.type == 'discrete':
-        model = DiscreteDenoisingDiffusion.load_from_checkpoint(resume, **model_kwargs)
-    else:
-        model = LiftedDenoisingDiffusion.load_from_checkpoint(resume, **model_kwargs)
+    model = FixedDiscreteDenoisingDiffusion.load_from_checkpoint(resume, **model_kwargs)
     cfg = model.cfg
     cfg.general.test_only = resume
     cfg.general.name = name
@@ -59,10 +55,7 @@ def get_resume_adaptive(cfg, model_kwargs):
 
     resume_path = os.path.join(root_dir, cfg.general.resume)
 
-    if cfg.model.type == 'discrete':
-        model = DiscreteDenoisingDiffusion.load_from_checkpoint(resume_path, **model_kwargs)
-    else:
-        model = LiftedDenoisingDiffusion.load_from_checkpoint(resume_path, **model_kwargs)
+    model = FixedDiscreteDenoisingDiffusion.load_from_checkpoint(resume_path, **model_kwargs)
     new_cfg = model.cfg
 
     for category in cfg:
@@ -88,19 +81,10 @@ def setup_wandb(cfg):
 @hydra.main(version_base='1.1', config_path='../configs', config_name='config')
 def main(cfg: DictConfig):
     dataset_config = cfg["dataset"]
-
-    if dataset_config["name"] in ['sbm', 'comm-20', 'planar']:
-        if dataset_config['name'] == 'sbm':
-            datamodule = SBMDataModule(cfg)
-            sampling_metrics = SBMSamplingMetrics(datamodule.dataloaders)
-        elif dataset_config['name'] == 'comm-20':
-            datamodule = Comm20DataModule(cfg)
-            sampling_metrics = Comm20SamplingMetrics(datamodule.dataloaders)
-        else:
-            datamodule = PlanarDataModule(cfg)
-            sampling_metrics = PlanarSamplingMetrics(datamodule.dataloaders)
-
-        dataset_infos = SpectreDatasetInfos(datamodule, dataset_config)
+    if dataset_config["name"] in ["sat"]:
+        datamodule = SatDataModule(cfg)
+        sampling_metrics = SatSamplingMetrics(datamodule.dataloaders)
+        dataset_infos = SatDatasetInfos(datamodule, dataset_config)
         train_metrics = TrainAbstractMetricsDiscrete() if cfg.model.type == 'discrete' else TrainAbstractMetrics()
         visualization_tools = NonMolecularVisualization()
 
@@ -112,50 +96,6 @@ def main(cfg: DictConfig):
 
         dataset_infos.compute_input_output_dims(datamodule=datamodule, extra_features=extra_features,
                                                 domain_features=domain_features)
-
-        model_kwargs = {'dataset_infos': dataset_infos, 'train_metrics': train_metrics,
-                        'sampling_metrics': sampling_metrics, 'visualization_tools': visualization_tools,
-                        'extra_features': extra_features, 'domain_features': domain_features}
-
-    elif dataset_config["name"] in ['qm9', 'guacamol', 'moses']:
-        if dataset_config["name"] == 'qm9':
-            datamodule = qm9_dataset.QM9DataModule(cfg)
-            dataset_infos = qm9_dataset.QM9infos(datamodule=datamodule, cfg=cfg)
-            datamodule.prepare_data()
-            train_smiles = qm9_dataset.get_train_smiles(cfg=cfg, train_dataloader=datamodule.train_dataloader(),
-                                                        dataset_infos=dataset_infos, evaluate_dataset=False)
-        elif dataset_config['name'] == 'guacamol':
-            datamodule = guacamol_dataset.GuacamolDataModule(cfg)
-            dataset_infos = guacamol_dataset.Guacamolinfos(datamodule, cfg)
-            datamodule.prepare_data()
-            train_smiles = None
-
-        elif dataset_config.name == 'moses':
-            datamodule = moses_dataset.MOSESDataModule(cfg)
-            dataset_infos = moses_dataset.MOSESinfos(datamodule, cfg)
-            datamodule.prepare_data()
-            train_smiles = None
-        else:
-            raise ValueError("Dataset not implemented")
-
-        if cfg.model.type == 'discrete' and cfg.model.extra_features is not None:
-            extra_features = ExtraFeatures(cfg.model.extra_features, dataset_info=dataset_infos)
-            domain_features = ExtraMolecularFeatures(dataset_infos=dataset_infos)
-        else:
-            extra_features = DummyExtraFeatures()
-            domain_features = DummyExtraFeatures()
-
-        dataset_infos.compute_input_output_dims(datamodule=datamodule, extra_features=extra_features,
-                                                domain_features=domain_features)
-
-        if cfg.model.type == 'discrete':
-            train_metrics = TrainMolecularMetricsDiscrete(dataset_infos)
-        else:
-            train_metrics = TrainMolecularMetrics(dataset_infos)
-
-        # We do not evaluate novelty during training
-        sampling_metrics = SamplingMolecularMetrics(dataset_infos, train_smiles)
-        visualization_tools = MolecularVisualization(cfg.dataset.remove_h, dataset_infos=dataset_infos)
 
         model_kwargs = {'dataset_infos': dataset_infos, 'train_metrics': train_metrics,
                         'sampling_metrics': sampling_metrics, 'visualization_tools': visualization_tools,
@@ -174,11 +114,7 @@ def main(cfg: DictConfig):
 
     utils.create_folders(cfg)
     cfg = setup_wandb(cfg)
-
-    if cfg.model.type == 'discrete':
-        model = DiscreteDenoisingDiffusion(cfg=cfg, **model_kwargs)
-    else:
-        model = LiftedDenoisingDiffusion(cfg=cfg, **model_kwargs)
+    model = FixedDiscreteDenoisingDiffusion(cfg=cfg, **model_kwargs)
 
     callbacks = []
     if cfg.train.save_model:
