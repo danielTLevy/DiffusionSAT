@@ -7,7 +7,7 @@ import torch_geometric.utils
 from dgd.datasets.abstract_dataset import AbstractDataModule, AbstractDatasetInfos
 
 # TODO: Update
-SAT_GRAPH_FILE = "sat/sat_v10_20_c20-50_n75_train.pt" 
+SAT_GRAPH_FILE = "sat/allsat_v10_20_c20_50_n750_train.pt" 
 
 
 
@@ -26,12 +26,13 @@ class SatDataset(Dataset):
         data = self.graphs[idx]
         n_edge_classes = data.edge_attr.shape[-1]
         is_sat = data.y
-        y = (is_sat*torch.tensor([[0,1]]) + (1 - is_sat)*torch.tensor([[1,0]])).float()
+        y = torch.zeros([1, 0]).float()
+        #y = (is_sat*torch.tensor([[0,1]]) + (1 - is_sat)*torch.tensor([[1,0]])).float()
         data.idx = idx
         n_nodes  = data.num_nodes * torch.ones(1, dtype=torch.long)
 
         # Symmetrize
-        edge_index, edge_attr = torch_geometric.utils.to_undirected(data.edge_index, data.edge_attr,  data.num_nodes)
+        edge_index, edge_attr = torch_geometric.utils.to_undirected(data.edge_index, data.edge_attr,  data.num_nodes, reduce='max')
         n_edges = edge_index.shape[-1]
 
         # Add edge type for "no edge"

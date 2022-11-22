@@ -16,6 +16,22 @@ class DummyExtraFeatures:
         empty_y = y.new_zeros((y.shape[0], 0))
         return utils.PlaceHolder(X=empty_x, E=empty_e, y=empty_y)
 
+class SatExtraFeatures:
+    def __init__(self):
+        """"
+        Right now this class doesn't do anything, but it 
+        should be updated to compute whether an instance is SAT
+        """
+
+
+    def __call__(self, noisy_data):
+        X = noisy_data['X_t']
+        E = noisy_data['E_t']
+        y = noisy_data['y_t']
+        empty_x = X.new_zeros((*X.shape[:-1], 0))
+        empty_e = E.new_zeros((*E.shape[:-1], 0))
+        empty_y = y.new_zeros((y.shape[0], 0))
+        return utils.PlaceHolder(X=empty_x, E=empty_e, y=empty_y)
 
 class ExtraFeatures:
     def __init__(self, extra_features_type, dataset_info):

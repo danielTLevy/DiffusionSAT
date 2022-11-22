@@ -1,12 +1,12 @@
 # @package _global_
 general:
-    name : 'debug'
+    name : 'allsat'
     gpus : 1
     wandb: 'online'
     resume: null            # If resume, path to ckpt file from outputs directory in main directory
     test_only: null
-    check_val_every_n_epochs: 1000
-    sample_every_val: 10
+    check_val_every_n_epochs: 10
+    sample_every_val: 5
     samples_to_generate: 20
     samples_to_save: 20
     chains_to_save: 1
@@ -18,7 +18,7 @@ general:
 
 train:
     n_epochs: 1000000
-    batch_size: 256
+    batch_size: 10
     save_model: True
 model:
     n_layers: 8

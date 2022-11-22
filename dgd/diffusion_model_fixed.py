@@ -361,6 +361,8 @@ class FixedDiscreteDenoisingDiffusion(pl.LightningModule):
         X0 = F.one_hot(sampled0.X, num_classes=self.Xdim_output).float()
         E0 = F.one_hot(sampled0.E, num_classes=self.Edim_output).float()
         y0 = sampled0.y
+        # TODO: assume y is correct and unchanging
+        #y0 = y
         assert (X.shape == X0.shape) and (E.shape == E0.shape)
 
         sampled_0 = utils.PlaceHolder(X=X0, E=E0, y=y0).mask(node_mask)
@@ -410,11 +412,13 @@ class FixedDiscreteDenoisingDiffusion(pl.LightningModule):
         # Compute transition probabilities
         probX = X @ Qtb.X  # (bs, n, dx_out)
         probE = E @ Qtb.E.unsqueeze(1)  # (bs, n, n, de_out)
+        #proby = y # TODO: Assume y is unchanging for now
 
         sampled_t = diffusion_utils.sample_discrete_features(probX=probX, probE=probE, node_mask=node_mask)
 
         X_t = F.one_hot(sampled_t.X, num_classes=self.Xdim_output)
         E_t = F.one_hot(sampled_t.E, num_classes=self.Edim_output)
+        #y_t = F.one_hot(sampled_t.y, num_classes=self.ydim_output)
         assert (X.shape == X_t.shape) and (E.shape == E_t.shape)
 
         z_t = utils.PlaceHolder(X=X_t, E=E_t, y=y).type_as(X_t).mask(node_mask)
@@ -439,6 +443,8 @@ class FixedDiscreteDenoisingDiffusion(pl.LightningModule):
 
         # 2. The KL between q(z_T | x) and p(z_T) = Uniform(1/num_classes). Should be close to zero.
         kl_prior = self.kl_prior(X, E, y, node_mask)
+        # TODO: turned off for now
+        # kl_prior = 0
 
         # 3. Diffusion loss
         loss_all_t = self.compute_Lt(X, E, y, pred, noisy_data, node_mask, test)

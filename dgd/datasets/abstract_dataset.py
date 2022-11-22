@@ -33,6 +33,9 @@ class AbstractDataModule(pl.LightningDataModule):
         return self.dataloaders['train'][idx]
 
     def node_counts(self, max_nodes_possible=300):
+        '''
+        Calculate probability of getting each count of nodes
+        '''
         all_counts = torch.zeros(max_nodes_possible)
         for split in ['train', 'val', 'test']:
             for i, data in enumerate(self.dataloaders[split]):
@@ -65,7 +68,7 @@ class AbstractDataModule(pl.LightningDataModule):
             num_classes = data.edge_attr.shape[1]
             break
 
-        d = torch.Tensor(num_classes)
+        d = torch.zeros(num_classes)
 
         for split in ['train', 'val', 'test']:
             for i, data in enumerate(self.dataloaders[split]):
