@@ -24,11 +24,8 @@ from dgd.metrics.abstract_metrics import TrainAbstractMetricsDiscrete, TrainAbst
 from dgd.analysis.spectre_utils import PlanarSamplingMetrics, SBMSamplingMetrics, Comm20SamplingMetrics
 from dgd.analysis.sat_utils import SatSamplingMetrics
 from diffusion_model_fixed import FixedDiscreteDenoisingDiffusion
-from dgd.metrics.molecular_metrics import TrainMolecularMetrics, SamplingMolecularMetrics, \
-    TrainMolecularMetricsDiscrete
-from dgd.analysis.visualization import MolecularVisualization, NonMolecularVisualization
+from dgd.analysis.visualization import NonMolecularVisualization
 from dgd.diffusion.extra_features import DummyExtraFeatures, ExtraFeatures
-from dgd.diffusion.extra_features_molecular import ExtraMolecularFeatures
 
 warnings.filterwarnings("ignore", category=PossibleUserWarning)
 

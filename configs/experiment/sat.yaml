@@ -11,7 +11,7 @@ general:
     samples_to_save: 20
     chains_to_save: 1
     log_every_steps: 50
-    number_chain_steps: 50        # Number of frames in each gif
+    number_chain_steps: 10        # Number of frames in each gif
     final_model_samples_to_generate: 20
     final_model_samples_to_save:
     final_model_chains_to_save: 10
@@ -19,8 +19,9 @@ general:
 train:
     n_epochs: 1000000
     batch_size: 10
-    save_model: True
+    save_model: False
 model:
     n_layers: 8
-    lambda_train: [5, 0]
+    lambda_train: [0, 0]
     extra_features: null
+    diffusion_steps: 20

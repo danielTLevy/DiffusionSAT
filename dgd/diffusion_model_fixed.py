@@ -8,7 +8,7 @@ import os
 
 from dgd.models.transformer_model import GraphTransformer
 from dgd.diffusion.noise_schedule import DiscreteUniformTransition, PredefinedNoiseScheduleDiscrete,\
-    MarginalUniformTransition
+    MarginalUniformTransition, DiscreteUniformFixedTransition
 from dgd.diffusion import diffusion_utils
 from dgd.metrics.train_metrics import TrainLossDiscrete
 from dgd.metrics.abstract_metrics import SumExceptBatchMetric, SumExceptBatchKL, NLL
@@ -77,7 +77,7 @@ class FixedDiscreteDenoisingDiffusion(pl.LightningModule):
 
         self.noise_schedule = PredefinedNoiseScheduleDiscrete(cfg.model.diffusion_noise_schedule,
                                                               timesteps=cfg.model.diffusion_steps)
-
+        
         if cfg.model.transition == 'uniform':
             self.transition_model = DiscreteUniformTransition(x_classes=self.Xdim_output, e_classes=self.Edim_output,
                                                               y_classes=self.ydim_output)
@@ -97,6 +97,14 @@ class FixedDiscreteDenoisingDiffusion(pl.LightningModule):
                                                               y_classes=self.ydim_output)
             self.limit_dist = utils.PlaceHolder(X=x_marginals, E=e_marginals,
                                                 y=torch.ones(self.ydim_output) / self.ydim_output)
+        elif cfg.model.transition == 'uniformfixed':
+            self.transition_model = DiscreteUniformTransition(x_classes=self.Xdim_output, e_classes=self.Edim_output,
+                                                    y_classes=self.ydim_output)
+            x_limit = torch.ones(self.Xdim_output) / self.Xdim_output
+            edge_types = self.dataset_info.edge_types.float()
+            e_limit =  edge_types / torch.sum(edge_types)
+            y_limit = torch.ones(self.ydim_output) / self.ydim_output
+            self.limit_dist = utils.PlaceHolder(X=x_limit, E=e_limit, y=y_limit)
 
         self.save_hyperparameters(ignore=[train_metrics, sampling_metrics])
         self.start_epoch_time = None
@@ -474,7 +482,11 @@ class FixedDiscreteDenoisingDiffusion(pl.LightningModule):
         X = torch.cat((noisy_data['X_t'], extra_data.X), dim=2).float()
         E = torch.cat((noisy_data['E_t'], extra_data.E), dim=3).float()
         y = torch.hstack((noisy_data['y_t'], extra_data.y)).float()
-        return self.model(X, E, y, node_mask)
+        # TODO: short circuit so that predE == E
+
+        pred = self.model(X, E, y, node_mask)
+        pred.E = E.clone()
+        return pred
 
     @torch.no_grad()
     def sample_batch(self, batch_id: int, batch_size: int, keep_chain: int, number_chain_steps: int,
@@ -523,7 +535,8 @@ class FixedDiscreteDenoisingDiffusion(pl.LightningModule):
             # Sample z_s
             sampled_s, discrete_sampled_s, predicted_graph = self.sample_p_zs_given_zt(t_norm, X, E, y, node_mask,
                                                                                        last_step=s_int==100)
-            X, E, y = sampled_s.X, sampled_s.E, sampled_s.y
+            # TODO: ignoring sampled_s.E entirely
+            #X, E, y = sampled_s.X, sampled_s.E, sampled_s.y
 
             # Save the first keep_chain graphs
             write_index = (s_int * number_chain_steps) // self.T
@@ -650,7 +663,9 @@ class FixedDiscreteDenoisingDiffusion(pl.LightningModule):
         sampled_s = diffusion_utils.sample_discrete_features(prob_X, prob_E, node_mask=node_mask)
 
         X_s = F.one_hot(sampled_s.X, num_classes=self.Xdim_output).float()
-        E_s = F.one_hot(sampled_s.E, num_classes=self.Edim_output).float()
+        #TODO: forcing E to be input again
+        E_s = E_t
+        #E_s = F.one_hot(sampled_s.E, num_classes=self.Edim_output).float()
 
         assert (E_s == torch.transpose(E_s, 1, 2)).all()
         assert (X_t.shape == X_s.shape) and (E_t.shape == E_s.shape)

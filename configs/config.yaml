@@ -1,6 +1,6 @@
 defaults:
     - general : general_default
-    - model : discrete
+    - model : fixed
     - train : train_default
     - dataset : qm9
 

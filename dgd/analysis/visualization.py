@@ -140,7 +140,6 @@ class MolecularVisualization:
             print("Can't kekulize molecule")
         return mols
 
-
 class NonMolecularVisualization:
     def to_networkx(self, node_list, adjacency_matrix):
         """
@@ -178,9 +177,10 @@ class NonMolecularVisualization:
         vmin, vmax = np.min(U[:, 1]), np.max(U[:, 1])
         m = max(np.abs(vmin), vmax)
         vmin, vmax = -m, m
-
+        # TODO:
+        node_colors = list(nx.get_node_attributes(graph, "color_val").values()) 
         plt.figure()
-        nx.draw(graph, pos, font_size=5, node_size=node_size, with_labels=False, node_color=U[:, 1],
+        nx.draw(graph, pos, font_size=5, node_size=node_size, with_labels=False, node_color=node_colors,
                 cmap=plt.cm.coolwarm, vmin=vmin, vmax=vmax, edge_color='grey')
 
         plt.tight_layout()
