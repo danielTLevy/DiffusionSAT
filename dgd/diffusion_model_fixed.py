@@ -266,47 +266,6 @@ class FixedDiscreteDenoisingDiffusion(pl.LightningModule):
         print("Done.")
 
 
-    def kl_prior(self, X, E, y, node_mask):
-        """Computes the KL between q(z1 | x) and the prior p(z1) = Normal(0, 1).
-
-        This is essentially a lot of work for something that is in practice negligible in the loss. However, you
-        compute it so that you see it when you've made a mistake in your noise schedule.
-        """
-        # Compute the last alpha value, alpha_T.
-        ones = torch.ones((X.size(0), 1), device=X.device)
-        Ts = self.T * ones
-        alpha_t_bar = self.noise_schedule.get_alpha_bar(t_int=Ts)  # (bs, 1)
-
-        Qtb = self.transition_model.get_Qt_bar(alpha_t_bar, self.device)
-
-        # Compute transition probabilities
-        probX = X @ Qtb.X  # (bs, n, dx_out)
-        probE = E @ Qtb.E.unsqueeze(1)  # (bs, n, n, de_out)
-        proby = y @ Qtb.y if y.numel() > 0 else y
-        assert probX.shape == X.shape
-
-        bs, n, _ = probX.shape
-
-        limit_X = self.limit_dist.X[None, None, :].expand(bs, n, -1).type_as(probX)
-        limit_E = self.limit_dist.E[None, None, None, :].expand(bs, n, n, -1).type_as(probE)
-        uniform_dist_y = torch.ones_like(proby) / self.ydim_output
-
-        # Make sure that masked rows do not contribute to the loss
-        limit_dist_X, limit_dist_E, probX, probE = diffusion_utils.mask_distributions(true_X=limit_X.clone(),
-                                                                                      true_E=limit_E.clone(),
-                                                                                      pred_X=probX,
-                                                                                      pred_E=probE,
-                                                                                      node_mask=node_mask)
-
-        kl_distance_X = F.kl_div(input=probX.log(), target=limit_dist_X, reduction='none')
-        kl_distance_E = F.kl_div(input=probE.log(), target=limit_dist_E, reduction='none')
-        kl_distance_y = F.kl_div(input=proby.log(), target=uniform_dist_y, reduction='none')
-
-        return diffusion_utils.sum_except_batch(kl_distance_X) + \
-               diffusion_utils.sum_except_batch(kl_distance_E) + \
-               diffusion_utils.sum_except_batch(kl_distance_y)
-
-
     def compute_Lt(self, X, E, y, pred, noisy_data, node_mask, test):
         pred_probs_X = F.softmax(pred.X, dim=-1)
         pred_probs_E = F.softmax(pred.E, dim=-1)

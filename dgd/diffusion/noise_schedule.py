@@ -141,8 +141,10 @@ class DiscreteUniformFixedTransition:
         self.E_classes = e_classes
         self.y_classes = y_classes
         self.u_x = torch.ones(1, self.X_classes, self.X_classes)
-        if self.X_classes > 0:
-            self.u_x = self.u_x / self.X_classes
+        self.u_x = self.u_x / (self.X_classes - 1)
+        self.u_x[:,:,0].zero_()
+        self.u_x[:,0,:].zero_()
+        self.u_x[:,0,0] = 1.
 
         self.u_e = torch.ones(1, self.E_classes, self.E_classes)
         if self.E_classes > 0:
