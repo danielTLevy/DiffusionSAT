@@ -39,39 +39,14 @@ class NonMolecularVisualization:
     def visualize_sat(self, graph, pos, path, iterations=100, node_size=100):
         # Plot the graph structure with colors
         # TODO: make this bipartite
-        if pos is None:
-            pos = nx.spring_layout(graph, iterations=iterations)
-
         node_colors = list(nx.get_node_attributes(graph, "color_val").values()) 
+        
+        clauses = (np.array(node_colors) == 0).nonzero()[0]
+        pos = nx.bipartite_layout(graph, clauses)
+
         plt.figure()
         nx.draw(graph, pos, font_size=5, node_size=node_size, with_labels=False, node_color=node_colors,
                 cmap=plt.cm.coolwarm, vmin=0, vmax=2, edge_color='grey')
-
-        plt.tight_layout()
-        plt.savefig(path)
-        plt.close("all")
-
-
-    def visualize_non_molecule(self, graph, pos, path, iterations=100, node_size=100, largest_component=False):
-        if largest_component:
-            CGs = [graph.subgraph(c) for c in nx.connected_components(graph)]
-            CGs = sorted(CGs, key=lambda x: x.number_of_nodes(), reverse=True)
-            graph = CGs[0]
-
-        # Plot the graph structure with colors
-        if pos is None:
-            pos = nx.spring_layout(graph, iterations=iterations)
-
-        # Set node colors based on the eigenvectors
-        w, U = np.linalg.eigh(nx.normalized_laplacian_matrix(graph).toarray())
-        vmin, vmax = np.min(U[:, 1]), np.max(U[:, 1])
-        m = max(np.abs(vmin), vmax)
-        vmin, vmax = -m, m
-        # TODO:
-        node_colors = list(nx.get_node_attributes(graph, "color_val").values()) 
-        plt.figure()
-        nx.draw(graph, pos, font_size=5, node_size=node_size, with_labels=False, node_color=node_colors,
-                cmap=plt.cm.coolwarm, vmin=vmin, vmax=vmax, edge_color='grey')
 
         plt.tight_layout()
         plt.savefig(path)
