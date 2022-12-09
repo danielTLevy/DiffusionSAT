@@ -167,7 +167,7 @@ class DiscreteUniformFixedTransition:
 
         # TODO: make this ignore clause nodes
         q_x = beta_t * self.u_x + (1 - beta_t) * torch.eye(self.X_classes, device=device).unsqueeze(0)
-        q_e = torch.eye(self.E_classes, device=device).unsqueeze(0)
+        q_e = torch.ones(beta_t.shape, device=device) * torch.eye(self.E_classes, device=device).unsqueeze(0)
         q_y = beta_t * self.u_y + (1 - beta_t) * torch.eye(self.y_classes, device=device).unsqueeze(0)
 
         return utils.PlaceHolder(X=q_x, E=q_e, y=q_y)
@@ -186,7 +186,7 @@ class DiscreteUniformFixedTransition:
         self.u_y = self.u_y.to(device)
 
         q_x = alpha_bar_t * torch.eye(self.X_classes, device=device).unsqueeze(0) + (1 - alpha_bar_t) * self.u_x
-        q_e = torch.eye(self.E_classes, device=device).unsqueeze(0) 
+        q_e = torch.ones(alpha_bar_t.shape, device=device) * torch.eye(self.E_classes, device=device).unsqueeze(0)
         q_y = alpha_bar_t * torch.eye(self.y_classes, device=device).unsqueeze(0) + (1 - alpha_bar_t) * self.u_y
 
         return utils.PlaceHolder(X=q_x, E=q_e, y=q_y)

@@ -78,33 +78,14 @@ class FixedDiscreteDenoisingDiffusion(pl.LightningModule):
         self.noise_schedule = PredefinedNoiseScheduleDiscrete(cfg.model.diffusion_noise_schedule,
                                                               timesteps=cfg.model.diffusion_steps)
         
-        if cfg.model.transition == 'uniform':
-            self.transition_model = DiscreteUniformTransition(x_classes=self.Xdim_output, e_classes=self.Edim_output,
-                                                              y_classes=self.ydim_output)
-            x_limit = torch.ones(self.Xdim_output) / self.Xdim_output
-            e_limit = torch.ones(self.Edim_output) / self.Edim_output
-            y_limit = torch.ones(self.ydim_output) / self.ydim_output
-            self.limit_dist = utils.PlaceHolder(X=x_limit, E=e_limit, y=y_limit)
-        elif cfg.model.transition == 'marginal':
 
-            node_types = self.dataset_info.node_types.float()
-            x_marginals = node_types / torch.sum(node_types)
-
-            edge_types = self.dataset_info.edge_types.float()
-            e_marginals = edge_types / torch.sum(edge_types)
-            print(f"Marginal distribution of the classes: {x_marginals} for nodes, {e_marginals} for edges")
-            self.transition_model = MarginalUniformTransition(x_marginals=x_marginals, e_marginals=e_marginals,
-                                                              y_classes=self.ydim_output)
-            self.limit_dist = utils.PlaceHolder(X=x_marginals, E=e_marginals,
-                                                y=torch.ones(self.ydim_output) / self.ydim_output)
-        elif cfg.model.transition == 'uniformfixed':
-            self.transition_model = DiscreteUniformTransition(x_classes=self.Xdim_output, e_classes=self.Edim_output,
-                                                    y_classes=self.ydim_output)
-            x_limit = torch.ones(self.Xdim_output) / self.Xdim_output
-            edge_types = self.dataset_info.edge_types.float()
-            e_limit =  edge_types / torch.sum(edge_types)
-            y_limit = torch.ones(self.ydim_output) / self.ydim_output
-            self.limit_dist = utils.PlaceHolder(X=x_limit, E=e_limit, y=y_limit)
+        self.transition_model = DiscreteUniformFixedTransition(x_classes=self.Xdim_output, e_classes=self.Edim_output,
+                                                y_classes=self.ydim_output)
+        x_limit = torch.ones(self.Xdim_output) / self.Xdim_output
+        edge_types = self.dataset_info.edge_types.float()
+        e_limit =  edge_types / torch.sum(edge_types)
+        y_limit = torch.ones(self.ydim_output) / self.ydim_output
+        self.limit_dist = utils.PlaceHolder(X=x_limit, E=e_limit, y=y_limit)
 
         self.save_hyperparameters(ignore=[train_metrics, sampling_metrics])
         self.start_epoch_time = None
@@ -325,6 +306,7 @@ class FixedDiscreteDenoisingDiffusion(pl.LightningModule):
                diffusion_utils.sum_except_batch(kl_distance_E) + \
                diffusion_utils.sum_except_batch(kl_distance_y)
 
+
     def compute_Lt(self, X, E, y, pred, noisy_data, node_mask, test):
         pred_probs_X = F.softmax(pred.X, dim=-1)
         pred_probs_E = F.softmax(pred.E, dim=-1)
@@ -450,9 +432,9 @@ class FixedDiscreteDenoisingDiffusion(pl.LightningModule):
         log_pN = self.node_dist.log_prob(N)
 
         # 2. The KL between q(z_T | x) and p(z_T) = Uniform(1/num_classes). Should be close to zero.
-        kl_prior = self.kl_prior(X, E, y, node_mask)
+        # kl_prior = self.kl_prior(X, E, y, node_mask)
         # TODO: turned off for now
-        # kl_prior = 0
+        kl_prior = None
 
         # 3. Diffusion loss
         loss_all_t = self.compute_Lt(X, E, y, pred, noisy_data, node_mask, test)
@@ -465,13 +447,16 @@ class FixedDiscreteDenoisingDiffusion(pl.LightningModule):
                       self.val_y_logp(y * prob0.y.log())
 
         # Combine terms
-        nlls = - log_pN + kl_prior + loss_all_t - loss_term_0
+        nlls = - log_pN + loss_all_t - loss_term_0
+        if kl_prior is not None:
+            nlls = nlls + kl_prior
+            
         assert len(nlls.shape) == 1, f'{nlls.shape} has more than only batch dim.'
 
         # Update NLL metric object and return batch nll
         nll = (self.test_nll if test else self.val_nll)(nlls)        # Average over the batch
 
-        wandb.log({"kl prior": kl_prior.mean(),
+        wandb.log({"kl prior": 0, #kl_prior.mean(),
                    "Estimator loss terms": loss_all_t.mean(),
                    "log_pn": log_pN.mean(),
                    "loss_term_0": loss_term_0,
