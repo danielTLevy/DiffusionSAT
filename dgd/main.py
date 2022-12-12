@@ -83,7 +83,10 @@ def main(cfg: DictConfig):
         sampling_metrics = SatSamplingMetrics(datamodule.dataloaders)
         dataset_infos = SatDatasetInfos(datamodule, dataset_config)
         train_metrics = TrainAbstractMetricsDiscrete() if cfg.model.type == 'discrete' else TrainAbstractMetrics()
-        visualization_tools = NonMolecularVisualization()
+        if cfg.general.skip_viz:
+            visualization_tools = None
+        else:
+            visualization_tools = NonMolecularVisualization()
 
         if cfg.model.type == 'discrete' and cfg.model.extra_features is not None:
             extra_features = ExtraFeatures(cfg.model.extra_features, dataset_info=dataset_infos)

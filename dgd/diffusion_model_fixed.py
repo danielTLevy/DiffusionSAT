@@ -10,6 +10,7 @@ from dgd.models.transformer_model import GraphTransformer
 from dgd.diffusion.noise_schedule import PredefinedNoiseScheduleDiscrete, DiscreteUniformFixedTransition
 from dgd.diffusion import diffusion_utils
 from dgd.metrics.train_metrics import TrainLossDiscrete
+from dgd.metrics.sat_metrics import SatSolvedMetric, calc_frac_clause_sat
 from dgd.metrics.abstract_metrics import SumExceptBatchMetric, SumExceptBatchKL, NLL
 from dgd import utils
 
@@ -42,22 +43,15 @@ class FixedDiscreteDenoisingDiffusion(pl.LightningModule):
         self.dataset_info = dataset_infos
 
         self.train_loss = TrainLossDiscrete(self.cfg.model.lambda_train)
+        self.sat_loss = SatSolvedMetric()
 
         self.val_nll = NLL()
         self.val_X_kl = SumExceptBatchKL()
-        self.val_E_kl = SumExceptBatchKL()
-        self.val_y_kl = SumExceptBatchKL()
         self.val_X_logp = SumExceptBatchMetric()
-        self.val_E_logp = SumExceptBatchMetric()
-        self.val_y_logp = SumExceptBatchMetric()
 
         self.test_nll = NLL()
         self.test_X_kl = SumExceptBatchKL()
-        self.test_E_kl = SumExceptBatchKL()
-        self.test_y_kl = SumExceptBatchKL()
         self.test_X_logp = SumExceptBatchMetric()
-        self.test_E_logp = SumExceptBatchMetric()
-        self.test_y_logp = SumExceptBatchMetric()
 
         self.train_metrics = train_metrics
         self.sampling_metrics = sampling_metrics
@@ -132,6 +126,7 @@ class FixedDiscreteDenoisingDiffusion(pl.LightningModule):
         self.val_nll.reset()
         self.val_X_kl.reset()
         self.val_X_logp.reset()
+        self.sat_loss.reset()
         self.sampling_metrics.reset()
 
     def validation_step(self, data, i):
@@ -141,15 +136,26 @@ class FixedDiscreteDenoisingDiffusion(pl.LightningModule):
         extra_data = self.compute_extra_data(noisy_data)
         pred = self.forward(noisy_data, extra_data, node_mask)
         nll = self.compute_val_loss(pred, noisy_data, dense_data.X, dense_data.E, data.y,  node_mask, test=False)
+
+        # Sample solutions
+        # TODO: this bit here
+        X, E = self.compute_sat(dense_data.X, dense_data.E, data.y, node_mask, batch_id=i, save_final = 1, number_chain_steps=self.number_chain_steps)
+
+        self.sat_loss.update(X, E)
         return {'loss': nll}
 
     def validation_epoch_end(self, outs) -> None:
         metrics = [self.val_nll.compute(), self.val_X_kl.compute(), self.val_X_logp.compute()]
+        sat_metrics =  self.sat_loss.compute()
+        metrics.extend(sat_metrics)
         wandb.log({"val/epoch_NLL": metrics[0],
                    "val/X_kl": metrics[1],
-                   "val/X_logp": metrics[2]}, commit=False)
+                   "val/X_logp": metrics[2],
+                   "val/total_sat": metrics[3],
+                   "val/clauses_sat": metrics[4]}, commit=False)
 
-        print(f"Epoch {self.current_epoch}: Val NLL {metrics[0] :.2f} -- Val Atom type KL {metrics[1] :.2f}\n")
+        print(f"Epoch {self.current_epoch}: Val NLL {metrics[0] :.2f} -- Val Node type KL {metrics[1] :.2f} \
+            -- Val Total Sat {metrics[3] :.2f} -- Val Clauses Sat {metrics[4] :.2f}  \n")
 
         # Log val nll with default Lightning logger, so it can be monitored by checkpoint callback
         val_nll = metrics[0]
@@ -158,35 +164,6 @@ class FixedDiscreteDenoisingDiffusion(pl.LightningModule):
         if val_nll < self.best_val_nll:
             self.best_val_nll = val_nll
         print('Val loss: %.4f \t Best val loss:  %.4f\n' % (val_nll, self.best_val_nll))
-
-        self.val_counter += 1
-        if self.val_counter % self.cfg.general.sample_every_val == 0:
-            start = time.time()
-            samples_left_to_generate = self.cfg.general.samples_to_generate
-            samples_left_to_save = self.cfg.general.samples_to_save
-            chains_left_to_save = self.cfg.general.chains_to_save
-
-            samples = []
-
-            ident = 0
-            while samples_left_to_generate > 0:
-                bs = 2 * self.cfg.train.batch_size
-                to_generate = min(samples_left_to_generate, bs)
-                to_save = min(samples_left_to_save, bs)
-                chains_save = min(chains_left_to_save, bs)
-                samples.extend(self.sample_batch(batch_id=ident, batch_size=to_generate, num_nodes=None,
-                                                 save_final=to_save,
-                                                 keep_chain=chains_save,
-                                                 number_chain_steps=self.number_chain_steps))
-                ident += to_generate
-
-                samples_left_to_save -= to_save
-                samples_left_to_generate -= to_generate
-                chains_left_to_save -= chains_save
-            print("Computing sampling metrics...")
-            self.sampling_metrics(samples, self.name, self.current_epoch, val_counter=-1, test=False)
-            print(f'Done. Sampling took {time.time() - start:.2f} seconds\n')
-            self.sampling_metrics.reset()
 
     def on_test_epoch_start(self) -> None:
         self.test_nll.reset()
@@ -353,6 +330,41 @@ class FixedDiscreteDenoisingDiffusion(pl.LightningModule):
                       'alpha_t_bar': alpha_t_bar, 'X_t': z_t.X, 'E_t': z_t.E, 'y_t': z_t.y, 'node_mask': node_mask}
         return noisy_data
 
+    def complete_noise(self, X, E, y, node_mask):
+        # Set timestamp t to be equal to T
+        t_int = torch.ones((X.size(0), 1), device=X.device) * self.T
+        s_int = t_int - 1
+
+        t_float = t_int / self.T
+        s_float = s_int / self.T
+
+        # beta_t and alpha_s_bar are used for denoising/loss computation
+        beta_t = self.noise_schedule(t_normalized=t_float)                         # (bs, 1)
+        alpha_s_bar = self.noise_schedule.get_alpha_bar(t_normalized=s_float)      # (bs, 1)
+        alpha_t_bar = self.noise_schedule.get_alpha_bar(t_normalized=t_float)      # (bs, 1)
+
+        Qtb = self.transition_model.get_Qt_bar(alpha_t_bar, device=self.device)  # (bs, dx_in, dx_out), (bs, de_in, de_out)
+        assert (abs(Qtb.X.sum(dim=2) - 1.) < 1e-4).all(), Qtb.X.sum(dim=2) - 1
+        assert (abs(Qtb.E.sum(dim=2) - 1.) < 1e-4).all()
+
+        # Compute transition probabilities
+        probX = X @ Qtb.X  # (bs, n, dx_out)
+        probE = E @ Qtb.E.unsqueeze(1)  # (bs, n, n, de_out)
+        #proby = y # TODO: Assume y is unchanging for now
+
+        sampled_t = diffusion_utils.sample_discrete_features(probX=probX, probE=probE, node_mask=node_mask)
+
+        X_t = F.one_hot(sampled_t.X, num_classes=self.Xdim_output)
+        E_t = F.one_hot(sampled_t.E, num_classes=self.Edim_output)
+        #y_t = F.one_hot(sampled_t.y, num_classes=self.ydim_output)
+        assert (X.shape == X_t.shape) and (E.shape == E_t.shape)
+
+        z_t = utils.PlaceHolder(X=X_t, E=E_t, y=y).type_as(X_t).mask(node_mask)
+
+        #noisy_data = {'t_int': t_int, 't': t_float, 'beta_t': beta_t, 'alpha_s_bar': alpha_s_bar,
+        #              'alpha_t_bar': alpha_t_bar, 'X_t': z_t.X, 'E_t': z_t.E, 'y_t': z_t.y, 'node_mask': node_mask}
+        return z_t
+
     def compute_val_loss(self, pred, noisy_data, X, E, y, node_mask, test=False):
         """Computes an estimator for the variational lower bound, or the simple loss (MSE).
            pred: (batch_size, n, total_features)
@@ -409,6 +421,119 @@ class FixedDiscreteDenoisingDiffusion(pl.LightningModule):
         pred = self.model(X, E, y, node_mask)
         pred.E = E.clone()
         return pred
+
+    @torch.no_grad()
+    def compute_sat(self, X, E, y, node_mask, batch_id: int,  number_chain_steps: int,
+                     save_final: int, num_nodes=None):
+        """
+        :param batch_id: int
+        :param batch_size: int
+        :param num_nodes: int, <int>tensor (batch_size) (optional) for specifying number of nodes
+        :param save_final: int: number of predictions to save to file
+        :param keep_chain: int: number of chains to save to file
+        :param keep_chain_steps: number of timesteps to save for each chain
+        :return: molecule_list. Each element of this list is a tuple (atom_types, charges, positions)
+        """
+        z_T = self.complete_noise(X, E, y, node_mask)
+        n_nodes = node_mask.sum(1)
+        batch_size = node_mask.shape[0]
+        keep_chain = batch_size
+        X, E, y = z_T.X, z_T.E, z_T.y
+
+        assert (E == torch.transpose(E, 1, 2)).all()
+        assert number_chain_steps < self.T
+        chain_X_size = torch.Size((number_chain_steps, batch_size, X.size(1)))
+        chain_E_size = torch.Size((number_chain_steps, keep_chain, E.size(1), E.size(2)))
+
+        chain_X = torch.zeros(chain_X_size)
+        chain_E = torch.zeros(chain_E_size)
+
+        # Iteratively sample p(z_s | z_t) for t = 1, ..., T, with s = t - 1.
+        for s_int in reversed(range(0, self.T)):
+            s_array = s_int * torch.ones((batch_size, 1)).type_as(y)
+            t_array = s_array + 1
+            s_norm = s_array / self.T
+            t_norm = t_array / self.T
+
+            # Sample z_s
+            sampled_s, discrete_sampled_s, predicted_graph = self.sample_p_zs_given_zt(t_norm, X, E, y, node_mask,
+                                                                                       last_step=s_int==100)
+            # Ignoring sampled_s.E entirely
+            #X, E, y = sampled_s.X, sampled_s.E, sampled_s.y
+            X = sampled_s.X
+
+            # Save the first keep_chain graphs
+            write_index = (s_int * number_chain_steps) // self.T
+            chain_X[write_index] = discrete_sampled_s.X[:keep_chain]
+            chain_E[write_index] = discrete_sampled_s.E[:keep_chain]
+
+        # Sample
+        sampled_s = sampled_s.mask(node_mask, collapse=True)
+        X, E, y = sampled_s.X, sampled_s.E, sampled_s.y
+        #X = sampled_s.X
+
+
+
+        # Prepare the chain for saving
+        if keep_chain > 0:
+            final_X_chain = X[:keep_chain]
+            final_E_chain = E[:keep_chain]
+
+            chain_X[0] = final_X_chain                  # Overwrite last frame with the resulting X, E
+            chain_E[0] = final_E_chain
+
+            chain_X = diffusion_utils.reverse_tensor(chain_X)
+            chain_E = diffusion_utils.reverse_tensor(chain_E)
+
+            # Repeat last frame to see final sample better
+            chain_X = torch.cat([chain_X, chain_X[-1:].repeat(10, 1, 1)], dim=0)
+            chain_E = torch.cat([chain_E, chain_E[-1:].repeat(10, 1, 1, 1)], dim=0)
+            assert chain_X.size(0) == (number_chain_steps + 10)
+
+        molecule_list = []
+        for i in range(batch_size):
+            n = n_nodes[i]
+            atom_types = X[i, :n].cpu()
+            edge_types = E[i, :n, :n].cpu()
+            molecule_list.append([atom_types, edge_types])
+            if i < 3:
+                print("Example of generated X: ", atom_types)
+                print("Example of generated E: ", edge_types)
+
+        predicted_graph_list = []
+        for i in range(batch_size):
+            n = n_nodes[i]
+            atom_types = X[i, :n].cpu()
+            edge_types = E[i, :n, :n].cpu()
+            predicted_graph_list.append([atom_types, edge_types])
+
+
+        # Visualize chains
+        if self.visualization_tools is not None:
+            print('Visualizing chains...')
+            current_path = os.getcwd()
+            num_molecules = chain_X.size(1)       # number of molecules
+            for i in range(num_molecules):
+                result_path = os.path.join(current_path, f'chains/{self.cfg.general.name}/'
+                                                         f'epoch{self.current_epoch}/'
+                                                         f'chains/molecule_{batch_id + i}')
+                if not os.path.exists(result_path):
+                    os.makedirs(result_path)
+                    _ = self.visualization_tools.visualize_chain(result_path,
+                                                                 chain_X[:, i, :].numpy(),
+                                                                 chain_E[:, i, :].numpy())
+                print('\r{}/{} complete'.format(i+1, num_molecules), end='', flush=True)
+            print('\nVisualizing molecules...')
+
+            # Visualize the final molecules
+            current_path = os.getcwd()
+            result_path = os.path.join(current_path,
+                                       f'graphs/{self.name}/epoch{self.current_epoch}_b{batch_id}/')
+            self.visualization_tools.visualize(result_path, molecule_list, save_final)
+            self.visualization_tools.visualize(result_path, predicted_graph_list, save_final, log='predicted')
+            print("Done.")
+
+        return X, E
 
     @torch.no_grad()
     def sample_batch(self, batch_id: int, batch_size: int, keep_chain: int, number_chain_steps: int,
@@ -494,8 +619,8 @@ class FixedDiscreteDenoisingDiffusion(pl.LightningModule):
             edge_types = E[i, :n, :n].cpu()
             molecule_list.append([atom_types, edge_types])
             if i < 3:
-                print("Example of generated E: ", atom_types)
-                print("Example of generated X: ", edge_types)
+                print("Example of generated E: ", edge_types)
+                print("Example of generated X: ", atom_types)
 
         predicted_graph_list = []
         for i in range(batch_size):
