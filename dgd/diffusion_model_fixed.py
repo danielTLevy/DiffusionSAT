@@ -2,9 +2,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
+import numpy as np
 import time
 import wandb
 import os
+import pickle as pkl
+
 
 from dgd.models.transformer_model import GraphTransformer
 from dgd.diffusion.noise_schedule import PredefinedNoiseScheduleDiscrete, DiscreteUniformFixedTransition
@@ -43,7 +46,8 @@ class FixedDiscreteDenoisingDiffusion(pl.LightningModule):
         self.dataset_info = dataset_infos
 
         self.train_loss = TrainLossDiscrete(self.cfg.model.lambda_train)
-        self.sat_loss = SatSolvedMetric()
+        self.val_sat_loss = SatSolvedMetric()
+        self.test_sat_loss = SatSolvedMetric()
 
         self.val_nll = NLL()
         self.val_X_kl = SumExceptBatchKL()
@@ -87,6 +91,7 @@ class FixedDiscreteDenoisingDiffusion(pl.LightningModule):
         self.log_every_steps = cfg.general.log_every_steps
         self.number_chain_steps = cfg.general.number_chain_steps
         self.best_val_nll = 1e8
+        self.best_clause_sat = 0
         self.val_counter = 0
 
     def training_step(self, data, i):
@@ -117,6 +122,7 @@ class FixedDiscreteDenoisingDiffusion(pl.LightningModule):
         self.start_epoch_time = time.time()
         self.train_loss.reset()
         self.train_metrics.reset()
+        wandb.log({"epoch": self.current_epoch}, commit=False)
 
     def on_train_epoch_end(self) -> None:
         self.train_loss.log_epoch_metrics(self.current_epoch, self.start_epoch_time)
@@ -126,7 +132,7 @@ class FixedDiscreteDenoisingDiffusion(pl.LightningModule):
         self.val_nll.reset()
         self.val_X_kl.reset()
         self.val_X_logp.reset()
-        self.sat_loss.reset()
+        self.val_sat_loss.reset()
         self.sampling_metrics.reset()
 
     def validation_step(self, data, i):
@@ -139,14 +145,14 @@ class FixedDiscreteDenoisingDiffusion(pl.LightningModule):
 
         # Sample solutions
         # TODO: this bit here
-        X, E = self.compute_sat(dense_data.X, dense_data.E, data.y, node_mask, batch_id=i, save_final = 1, number_chain_steps=self.number_chain_steps)
+        X, E, _ = self.compute_sat(dense_data.X, dense_data.E, data.y, node_mask, batch_id=i, save_final = 1, number_chain_steps=self.number_chain_steps)
 
-        self.sat_loss.update(X, E)
+        self.val_sat_loss.update(X, E)
         return {'loss': nll}
 
     def validation_epoch_end(self, outs) -> None:
         metrics = [self.val_nll.compute(), self.val_X_kl.compute(), self.val_X_logp.compute()]
-        sat_metrics =  self.sat_loss.compute()
+        sat_metrics =  self.val_sat_loss.compute()
         metrics.extend(sat_metrics)
         wandb.log({"val/epoch_NLL": metrics[0],
                    "val/X_kl": metrics[1],
@@ -154,18 +160,19 @@ class FixedDiscreteDenoisingDiffusion(pl.LightningModule):
                    "val/total_sat": metrics[3],
                    "val/clauses_sat": metrics[4]}, commit=False)
 
-        print(f"Epoch {self.current_epoch}: Val NLL {metrics[0] :.2f} -- Val Node type KL {metrics[1] :.2f} \
+        print(f"\nEpoch {self.current_epoch}: Val NLL {metrics[0] :.2f} -- Val Node type KL {metrics[1] :.2f} \
             -- Val Total Sat {metrics[3] :.2f} -- Val Clauses Sat {metrics[4] :.2f}  \n")
 
-        # Log val nll with default Lightning logger, so it can be monitored by checkpoint callback
-        val_nll = metrics[0]
-        self.log("val/epoch_NLL", val_nll)
+        # Log val clauses sat with default Lightning logger, so it can be monitored by checkpoint callback
+        clauses_sat = metrics[4]
+        self.log("val/clauses_sat", clauses_sat)
+        if clauses_sat > self.best_clause_sat:
+            self.best_clause_sat = clauses_sat
 
-        if val_nll < self.best_val_nll:
-            self.best_val_nll = val_nll
-        print('Val loss: %.4f \t Best val loss:  %.4f\n' % (val_nll, self.best_val_nll))
+        print('Clauses SAT: %.4f \t Best clauses SAT:  %.4f\n' % (clauses_sat, self.best_clause_sat))
 
     def on_test_epoch_start(self) -> None:
+        self.test_sat_loss.reset()
         self.test_nll.reset()
         self.test_X_kl.reset()
         self.test_X_logp.reset()
@@ -177,47 +184,33 @@ class FixedDiscreteDenoisingDiffusion(pl.LightningModule):
         extra_data = self.compute_extra_data(noisy_data)
         pred = self.forward(noisy_data, extra_data, node_mask)
         nll = self.compute_val_loss(pred, noisy_data, dense_data.X, dense_data.E, data.y, node_mask, test=True)
-        return {'loss': nll}
+
+
+        X, E, sat_stats = self.compute_sat(dense_data.X, dense_data.E, data.y, node_mask, batch_id=i, save_final = 1, number_chain_steps=self.number_chain_steps, test=True)
+
+        self.test_sat_loss.update(X, E)
+        return {'loss': nll, 'sat_stats': sat_stats}
 
     def test_epoch_end(self, outs) -> None:
         """ Measure likelihood on a test set and compute stability metrics. """
+
         metrics = [self.test_nll.compute(), self.test_X_kl.compute(), self.test_X_logp.compute()]
+        sat_metrics =  self.test_sat_loss.compute()
+        metrics.extend(sat_metrics)
         wandb.log({"test/epoch_NLL": metrics[0],
-                   "test/X_mse": metrics[1],
-                   "test/X_logp": metrics[2]}, commit=False)
+                   "test/X_kl": metrics[1],
+                   "test/X_logp": metrics[2],
+                   "test/total_sat": metrics[3],
+                   "test/clauses_sat": metrics[4]}, commit=True)
 
-        print(f"Epoch {self.current_epoch}: Test NLL {metrics[0] :.2f} -- Test Atom type KL {metrics[1] :.2f}\n")
-
-        test_nll = metrics[0]
-        wandb.log({"test/epoch_NLL": test_nll}, commit=False)
-
-        print(f'Test loss: {test_nll :.4f}')
-
-        samples_left_to_generate = self.cfg.general.final_model_samples_to_generate
-        samples_left_to_save = self.cfg.general.final_model_samples_to_save
-        chains_left_to_save = self.cfg.general.final_model_chains_to_save
-
-        samples = []
-        id = 0
-        while samples_left_to_generate > 0:
-            print(f'Samples left to generate: {samples_left_to_generate}/'
-                  f'{self.cfg.general.final_model_samples_to_generate}', end='', flush=True)
-            bs = 2 * self.cfg.train.batch_size
-            to_generate = min(samples_left_to_generate, bs)
-            to_save = min(samples_left_to_save, bs)
-            chains_save = min(chains_left_to_save, bs)
-            samples.extend(self.sample_batch(id, to_generate, num_nodes=None, save_final=to_save,
-                                             keep_chain=chains_save, number_chain_steps=self.number_chain_steps))
-            id += to_generate
-            samples_left_to_save -= to_save
-            samples_left_to_generate -= to_generate
-            chains_left_to_save -= chains_save
-        print("Computing sampling metrics...")
-        self.sampling_metrics.reset()
-        self.sampling_metrics(samples, self.name, self.current_epoch, self.val_counter, test=True)
-        self.sampling_metrics.reset()
-        print("Done.")
-
+        print(f"\nTest NLL {metrics[0] :.2f} -- Test Node type KL {metrics[1] :.2f} \
+            -- Test Total Sat {metrics[3] :.4f} -- Test Clauses Sat {metrics[4] :.4f}  \n")
+        #print(outs)
+        sat_stats = np.zeros((len(outs), self.T))
+        for i, out_i in enumerate(outs):
+            sat_stats[i] = outs["sat_stats"]
+        with open("test_sat_stats.pkl", "wb") as file:
+            pkl.dump(sat_stats, file)
 
     def compute_Lt(self, X, E, y, pred, noisy_data, node_mask, test):
         pred_probs_X = F.softmax(pred.X, dim=-1)
@@ -424,7 +417,7 @@ class FixedDiscreteDenoisingDiffusion(pl.LightningModule):
 
     @torch.no_grad()
     def compute_sat(self, X, E, y, node_mask, batch_id: int,  number_chain_steps: int,
-                     save_final: int, num_nodes=None):
+                     save_final: int, num_nodes=None, test=False):
         """
         :param batch_id: int
         :param batch_size: int
@@ -447,6 +440,7 @@ class FixedDiscreteDenoisingDiffusion(pl.LightningModule):
 
         chain_X = torch.zeros(chain_X_size)
         chain_E = torch.zeros(chain_E_size)
+        sat_stats = np.zeros((batch_size, self.T))
 
         # Iteratively sample p(z_s | z_t) for t = 1, ..., T, with s = t - 1.
         for s_int in reversed(range(0, self.T)):
@@ -461,6 +455,11 @@ class FixedDiscreteDenoisingDiffusion(pl.LightningModule):
             # Ignoring sampled_s.E entirely
             #X, E, y = sampled_s.X, sampled_s.E, sampled_s.y
             X = sampled_s.X
+            if test:
+                for i in range(batch_size):
+                    X_i = X[i].argmax(1)
+                    E_i = E[i].argmax(2)
+                    sat_stats[i, s_int] = calc_frac_clause_sat(X_i, E_i)
 
             # Save the first keep_chain graphs
             write_index = (s_int * number_chain_steps) // self.T
@@ -490,15 +489,16 @@ class FixedDiscreteDenoisingDiffusion(pl.LightningModule):
             chain_E = torch.cat([chain_E, chain_E[-1:].repeat(10, 1, 1, 1)], dim=0)
             assert chain_X.size(0) == (number_chain_steps + 10)
 
+
         molecule_list = []
         for i in range(batch_size):
             n = n_nodes[i]
             atom_types = X[i, :n].cpu()
             edge_types = E[i, :n, :n].cpu()
             molecule_list.append([atom_types, edge_types])
-            if i < 3:
-                print("Example of generated X: ", atom_types)
-                print("Example of generated E: ", edge_types)
+            #if i < 3:
+            #    print("Example of generated X: ", atom_types)
+            #    print("Example of generated E: ", edge_types)
 
         predicted_graph_list = []
         for i in range(batch_size):
@@ -507,7 +507,7 @@ class FixedDiscreteDenoisingDiffusion(pl.LightningModule):
             edge_types = E[i, :n, :n].cpu()
             predicted_graph_list.append([atom_types, edge_types])
 
-
+        
         # Visualize chains
         if self.visualization_tools is not None:
             print('Visualizing chains...')
@@ -533,7 +533,7 @@ class FixedDiscreteDenoisingDiffusion(pl.LightningModule):
             self.visualization_tools.visualize(result_path, predicted_graph_list, save_final, log='predicted')
             print("Done.")
 
-        return X, E
+        return X, E, sat_stats
 
     @torch.no_grad()
     def sample_batch(self, batch_id: int, batch_size: int, keep_chain: int, number_chain_steps: int,

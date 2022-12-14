@@ -47,10 +47,10 @@ def get_resume_adaptive(cfg, model_kwargs):
     """ Resumes a run. It loads previous config but allows to make some changes (used for resuming training)."""
     saved_cfg = cfg.copy()
     # Fetch path to this file to get base path
-    current_path = os.path.dirname(os.path.realpath(__file__))
-    root_dir = current_path.split('outputs')[0]
+    current_path = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    #root_dir = current_path.split('outputs')[0]
 
-    resume_path = os.path.join(root_dir, cfg.general.resume)
+    resume_path = os.path.join(current_path, cfg.general.resume)
 
     model = FixedDiscreteDenoisingDiffusion.load_from_checkpoint(resume_path, **model_kwargs)
     new_cfg = model.cfg
@@ -62,7 +62,7 @@ def get_resume_adaptive(cfg, model_kwargs):
     new_cfg.general.resume = resume_path
     new_cfg.general.name = new_cfg.general.name + '_resume'
 
-    new_cfg = cfg.update_config_with_new_keys(new_cfg, saved_cfg)
+    new_cfg = utils.update_config_with_new_keys(new_cfg, saved_cfg)
     return new_cfg, model
 
 
@@ -120,9 +120,9 @@ def main(cfg: DictConfig):
     if cfg.train.save_model:
         checkpoint_callback = ModelCheckpoint(dirpath=f"checkpoints/{cfg.general.name}",
                                               filename='{epoch}',
-                                              monitor='val/epoch_NLL',
-                                              save_top_k=5,
-                                              mode='min',
+                                              monitor='val/clauses_sat', 
+                                              save_top_k=1,
+                                              mode='max',
                                               every_n_epochs=1)
         callbacks.append(checkpoint_callback)
 

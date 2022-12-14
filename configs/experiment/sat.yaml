@@ -15,11 +15,12 @@ general:
     final_model_samples_to_generate: 20
     final_model_samples_to_save:
     final_model_chains_to_save: 10
+    skip_viz: True
 
 train:
-    n_epochs: 1000000
-    batch_size: 10
-    save_model: False
+    n_epochs: 10000
+    batch_size: 100
+    save_model: True
 model:
     n_layers: 8
     lambda_train: [0, 0]

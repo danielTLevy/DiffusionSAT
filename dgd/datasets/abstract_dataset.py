@@ -32,7 +32,7 @@ class AbstractDataModule(pl.LightningDataModule):
     def __getitem__(self, idx):
         return self.dataloaders['train'][idx]
 
-    def node_counts(self, max_nodes_possible=300):
+    def node_counts(self, max_nodes_possible=1000):
         '''
         Calculate probability of getting each count of nodes
         '''
